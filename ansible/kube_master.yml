@@ -1,0 +1,84 @@
+- hosts: master
+  become: yes
+  tasks:
+    - name: Ensure /etc/kubernetes directory exists
+      file:
+        path: /etc/kubernetes
+        state: directory
+        mode: '0755'
+
+    - name: Create an Empty file for Kubeadm configuring
+      copy:
+        content: ""
+        dest: /etc/kubernetes/kubeadm-config.yaml
+        force: no
+
+    - name: Configure container runtime
+      blockinfile:
+        path: /etc/kubernetes/kubeadm-config.yaml
+        block: |
+          kind: ClusterConfiguration
+          apiVersion: kubeadm.k8s.io/v1beta3
+          networking:
+            podSubnet: "10.244.0.0/16"
+          ---
+          kind: KubeletConfiguration
+          apiVersion: kubelet.config.k8s.io/v1beta1
+          runtimeRequestTimeout: "15m"
+          cgroupDriver: "systemd"
+          systemReserved:
+            cpu: 100m
+            memory: 350M
+          kubeReserved:
+            cpu: 100m
+            memory: 50M
+          enforceNodeAllocatable:
+          - pods
+
+    - name: Ensure containerd and kubelet are running
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - containerd
+        - kubelet      
+
+    - name: Initialize the cluster
+      shell: kubeadm init --config /etc/kubernetes/kubeadm-config.yaml
+      register: kubeadm_init_result
+      args:
+        chdir: /home/ubuntu
+      failed_when: kubeadm_init_result.rc != 0 and
+             "'Your Kubernetes control-plane has initialized successfully'" not in kubeadm_init_result.stdout  
+
+    - name: Create .kube directory
+      become: yes
+      become_user: ubuntu
+      file:
+        path: $HOME/.kube
+        state: directory
+        mode: 0755
+
+    - name: Check if admin.conf exists
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: admin_conf_stat    
+
+    - name: Copy admin.conf to User's kube config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+      when: admin_conf_stat.stat.exists
+
+    - name: Install Pod Network
+      become: yes
+      become_user: ubuntu
+      shell: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml >> pod_network_setup.log
+      args:
+        chdir: $HOME
+        creates: pod_network_setup.log
